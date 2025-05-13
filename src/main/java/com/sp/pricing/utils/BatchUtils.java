@@ -1,4 +1,4 @@
-package com.sp.pricing;
+package com.sp.pricing.utils;
 
 import com.sp.pricing.domain.Batch;
 import com.sp.pricing.exception.BatchUploadException;

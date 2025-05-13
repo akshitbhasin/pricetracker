@@ -1,11 +1,5 @@
 package com.sp.pricing.service;
 
-import java.time.Instant;
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.locks.ReentrantReadWriteLock;
-
 import com.sp.pricing.domain.Batch;
 import com.sp.pricing.domain.BatchStatus;
 import com.sp.pricing.domain.PriceRecord;
@@ -14,12 +8,19 @@ import com.sp.pricing.exception.BatchException;
 import com.sp.pricing.exception.BatchNotFoundException;
 import com.sp.pricing.exception.BatchUploadException;
 import org.apache.commons.collections4.CollectionUtils;
-import org.apache.commons.collections4.MapUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import static com.sp.pricing.BatchUtils.logBatchUploadMessage;
-import static com.sp.pricing.BatchUtils.validateBatchForUpload;
+import java.time.Instant;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+
+import static com.sp.pricing.utils.BatchUtils.logBatchUploadMessage;
+import static com.sp.pricing.utils.BatchUtils.validateBatchForUpload;
+import static com.sp.pricing.utils.Constants.CHUNK_SIZE_ARGUMENT;
+import static com.sp.pricing.utils.Constants.CHUNK_SIZE_DEFAULT_VALUE;
 
 /**
  * In-memory implementation of the PriceService that maintains the latest prices of instruments.
@@ -31,21 +32,40 @@ public class PriceServiceImpl implements PriceService {
 
     private static final Logger logger = LoggerFactory.getLogger(PriceServiceImpl.class);
 
-    /** Configurable batch chunk size (for logging warnings) via system property "priceService.batch.chunkSize". Default is 1000. */
-    private static final int BATCH_CHUNK_SIZE = Integer.parseInt(
-            System.getProperty("priceService.batch.chunkSize", "1000"));
+    /** Configurable batch chunk size (for logging warnings). */
+    private final int batchChunkSize;
 
     /** Map of instrument ID to its price history (sorted by timestamp). Only accessed under the rwLock. */
-    private final Map<String, NavigableMap<Instant, PriceRecord<?>>> instrumentPrices = new HashMap<>();
+    private final Map<String, NavigableMap<Instant, PriceRecord<?>>> instrumentPrices;
 
     /** Map of active (ongoing) batches, allowing thread-safe concurrent access by batch ID. */
-    private final ConcurrentHashMap<Long, Batch> activeBatches = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, Batch> activeBatches;
 
     /** Generator for unique batch IDs. */
-    private final AtomicLong nextBatchId = new AtomicLong(1);
+    private final AtomicLong nextBatchId;
 
     /** Read-write lock to control concurrent access to instrumentPrices. Allows multiple readers or one writer. */
-    private final ReentrantReadWriteLock rwLock = new ReentrantReadWriteLock();
+    private final ReentrantReadWriteLock readWriteLock;
+
+    /** Default Constructor (uses System Properties for batch size) */
+    public PriceServiceImpl() {
+        this(
+                Integer.parseInt(System.getProperty(CHUNK_SIZE_ARGUMENT, CHUNK_SIZE_DEFAULT_VALUE)),
+                new ConcurrentHashMap<>(),
+                new ReentrantReadWriteLock()
+        );
+    }
+
+    /** Fully Configurable Constructor */
+    public PriceServiceImpl(int batchChunkSize,
+                            ConcurrentHashMap<Long, Batch> activeBatches,
+                            ReentrantReadWriteLock readWriteLock) {
+        this.batchChunkSize = batchChunkSize;
+        this.activeBatches = activeBatches;
+        this.instrumentPrices = new HashMap<>(); // Always in-memory
+        this.readWriteLock = readWriteLock;
+        this.nextBatchId = new AtomicLong(1);
+    }
 
     @Override
     public long startBatch() {
@@ -74,7 +94,7 @@ public class PriceServiceImpl implements PriceService {
             // Add records to the batch
             batch.getRecords().addAll(records);
         }
-        logBatchUploadMessage(batchId, records.size(), BATCH_CHUNK_SIZE);
+        logBatchUploadMessage(batchId, records.size(), batchChunkSize);
     }
 
     @Override
@@ -89,7 +109,7 @@ public class PriceServiceImpl implements PriceService {
             batch.setStatus(BatchStatus.COMPLETED);
 
             // Acquire write lock to block readers and other writers while applying updates
-            rwLock.writeLock().lock();
+            readWriteLock.writeLock().lock();
             try {
                 // Stream-based refactor for updating instrument prices
                 batch.getRecords().stream()
@@ -102,11 +122,11 @@ public class PriceServiceImpl implements PriceService {
                                     });
                         });
             } finally {
-                rwLock.writeLock().unlock();
+                readWriteLock.writeLock().unlock();
             }
         }
 
-        logger.info("Completed batch {} ({} records applied)", batchId, batch.getRecords().size());
+        logger.info("Completed batch {} ({} records processed)", batchId, batch.getRecords().size());
         // All records are now visible to queries. The Batch object will be GC'd since it's no longer referenced.
     }
 
@@ -118,7 +138,7 @@ public class PriceServiceImpl implements PriceService {
             if (batch.isCompleted()) {
                 throw new BatchException("Cannot cancel a completed batch");
             }
-            batch.getRecords().clear(); // discard any staged records
+            batch.getRecords().clear();
         }
         logger.info("Canceled batch: {}", batchId);
     }
@@ -131,14 +151,14 @@ public class PriceServiceImpl implements PriceService {
 
     @Override
     public Optional<PriceRecord<?>> getLatestPrice(String instrumentId, Instant asOf) {
-        rwLock.readLock().lock();
+        readWriteLock.readLock().lock();
         try {
             return Optional.ofNullable(instrumentPrices.get(instrumentId))
                     .filter(map -> !map.isEmpty())
                     .map(map -> map.floorEntry(asOf))
                     .map(Map.Entry::getValue);
         } finally {
-            rwLock.readLock().unlock();
+            readWriteLock.readLock().unlock();
         }
     }
 
