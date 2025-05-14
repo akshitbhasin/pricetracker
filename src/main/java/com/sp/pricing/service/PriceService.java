@@ -56,7 +56,6 @@ public interface PriceService {
 
     /**
      * Retrieves the most recent price record for the given instrument as of the specified timestamp.
-     * <p>
      * This returns the latest price record whose {@code asOf} time is less than or equal to the provided timestamp.
      *
      * @param instrumentId the instrument identifier.

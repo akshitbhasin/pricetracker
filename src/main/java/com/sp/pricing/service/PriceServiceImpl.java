@@ -32,10 +32,10 @@ public class PriceServiceImpl implements PriceService {
 
     private static final Logger logger = LoggerFactory.getLogger(PriceServiceImpl.class);
 
-    /** Configurable batch chunk size (for logging warnings). */
+    /** Configurable batch chunk size. */
     private final int batchChunkSize;
 
-    /** Map of instrument ID to its price history (sorted by timestamp). Only accessed under the rwLock. */
+    /** Map of instrument ID to its price history (sorted by timestamp). Only accessed under the readwriteLock. */
     private final Map<String, NavigableMap<Instant, PriceRecord<?>>> instrumentPrices;
 
     /** Map of active (ongoing) batches, allowing thread-safe concurrent access by batch ID. */
@@ -47,7 +47,6 @@ public class PriceServiceImpl implements PriceService {
     /** Read-write lock to control concurrent access to instrumentPrices. Allows multiple readers or one writer. */
     private final ReentrantReadWriteLock readWriteLock;
 
-    /** Default Constructor (uses System Properties for batch size) */
     public PriceServiceImpl() {
         this(
                 Integer.parseInt(System.getProperty(CHUNK_SIZE_ARGUMENT, CHUNK_SIZE_DEFAULT_VALUE)),
@@ -56,13 +55,12 @@ public class PriceServiceImpl implements PriceService {
         );
     }
 
-    /** Fully Configurable Constructor */
     public PriceServiceImpl(int batchChunkSize,
                             ConcurrentHashMap<Long, Batch> activeBatches,
                             ReentrantReadWriteLock readWriteLock) {
         this.batchChunkSize = batchChunkSize;
         this.activeBatches = activeBatches;
-        this.instrumentPrices = new HashMap<>(); // Always in-memory
+        this.instrumentPrices = new HashMap<>();
         this.readWriteLock = readWriteLock;
         this.nextBatchId = new AtomicLong(1);
     }
@@ -87,11 +85,9 @@ public class PriceServiceImpl implements PriceService {
         Batch batch = getOrThrow(batchId);
         synchronized (batch) {
             validateBatchForUpload(batch);
-            // Transition to UPLOADING status if just started
             if (batch.isStartable()) {
                 batch.setStatus(BatchStatus.UPLOADING);
             }
-            // Add records to the batch
             batch.getRecords().addAll(records);
         }
         logBatchUploadMessage(batchId, records.size(), batchChunkSize);
